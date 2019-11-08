@@ -891,7 +891,7 @@ func TestHandshakeClientSCTs(t *testing.T) {
 				scts[247:],
 			}
 			if n := len(state.SignedCertificateTimestamps); n != len(expectedSCTs) {
-				return fmt.Errorf("Got %d scts, wanted %d", n, len(expectedSCTs))
+				return fmt.Errorf("Got %d sctListSupported, wanted %d", n, len(expectedSCTs))
 			}
 			for i, expected := range expectedSCTs {
 				if sct := state.SignedCertificateTimestamps[i]; !bytes.Equal(sct, expected) {

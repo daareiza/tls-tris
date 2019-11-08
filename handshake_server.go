@@ -255,6 +255,7 @@ Curves:
 			c.sendAlert(alertInternalError)
 			return false, err
 		}
+		hs.hello.secureRenegotiation = hs.clientHello.secureRenegotiation
 		hs.hello.secureRenegotiationSupported = hs.clientHello.secureRenegotiationSupported
 		hs.hello.compressionMethod = compressionNone
 	} else {
@@ -303,7 +304,7 @@ Curves:
 	// Set the private key for this handshake to the certificate's secret key.
 	hs.privateKey = hs.cert.PrivateKey
 
-	if hs.clientHello.scts {
+	if hs.clientHello.sctListSupported {
 		hs.hello.scts = hs.cert.SignedCertificateTimestamps
 	}
 
@@ -314,7 +315,7 @@ Curves:
 	// If one is available, the session is using TLS >= 1.2, and the client
 	// accepts the delegated credential extension, then set the handshake
 	// private key to the DC private key.
-	if c.config.GetDelegatedCredential != nil && hs.clientHello.delegatedCredential && c.vers >= VersionTLS12 {
+	if c.config.GetDelegatedCredential != nil && hs.clientHello.delegatedCredentials && c.vers >= VersionTLS12 {
 		dc, sk, err := c.config.GetDelegatedCredential(hs.clientHelloInfo(), c.vers)
 		if err != nil {
 			c.sendAlert(alertInternalError)
@@ -409,7 +410,7 @@ func (hs *serverHandshakeState) checkForResumption() bool {
 	}
 
 	// Do not resume connections where client support for EMS has changed
-	if (hs.clientHello.extendedMSSupported && c.config.UseExtendedMasterSecret) != hs.sessionState.usedEMS {
+	if (hs.clientHello.extendedMasterSecret && c.config.UseExtendedMasterSecret) != hs.sessionState.usedEMS {
 		return false
 	}
 
@@ -450,7 +451,7 @@ func (hs *serverHandshakeState) doResumeHandshake() error {
 	// that we're doing a resumption.
 	hs.hello.sessionId = hs.clientHello.sessionId
 	hs.hello.ticketSupported = hs.sessionState.usedOldKey
-	hs.hello.extendedMSSupported = hs.clientHello.extendedMSSupported && c.config.UseExtendedMasterSecret
+	hs.hello.extendedMSSupported = hs.clientHello.extendedMasterSecret && c.config.UseExtendedMasterSecret
 	hs.finishedHash = newFinishedHash(c.vers, hs.suite)
 	hs.finishedHash.discardHandshakeBuffer()
 	hs.finishedHash.Write(hs.clientHello.marshal())
@@ -480,7 +481,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 
 	hs.hello.ticketSupported = hs.clientHello.ticketSupported && !c.config.SessionTicketsDisabled
 	hs.hello.cipherSuite = hs.suite.id
-	hs.hello.extendedMSSupported = hs.clientHello.extendedMSSupported && c.config.UseExtendedMasterSecret
+	hs.hello.extendedMSSupported = hs.clientHello.extendedMasterSecret && c.config.UseExtendedMasterSecret
 
 	hs.finishedHash = newFinishedHash(hs.c.vers, hs.suite)
 	if c.config.ClientAuth == NoClientCert {
@@ -910,8 +911,8 @@ func (hs *serverHandshakeState) clientHelloInfo() *ClientHelloInfo {
 	}
 
 	var pskBinder []byte
-	if len(hs.clientHello.psks) > 0 {
-		pskBinder = hs.clientHello.psks[0].binder
+	if len(hs.clientHello.pskIdentities) > 0 {
+		pskBinder = hs.clientHello.pskIdentities[0].binder
 	}
 
 	hs.cachedClientHelloInfo = &ClientHelloInfo{
@@ -919,12 +920,12 @@ func (hs *serverHandshakeState) clientHelloInfo() *ClientHelloInfo {
 		ServerName:                 hs.clientHello.serverName,
 		SupportedCurves:            hs.clientHello.supportedCurves,
 		SupportedPoints:            hs.clientHello.supportedPoints,
-		SignatureSchemes:           hs.clientHello.supportedSignatureAlgorithms,
+		SignatureSchemes:           hs.clientHello.signatureAlgorithms,
 		SupportedProtos:            hs.clientHello.alpnProtocols,
 		SupportedVersions:          supportedVersions,
 		Conn:                       hs.c.conn,
-		Offered0RTTData:            hs.clientHello.earlyData,
-		AcceptsDelegatedCredential: hs.clientHello.delegatedCredential,
+		Offered0RTTData:            hs.clientHello.hasEarlyData,
+		AcceptsDelegatedCredential: hs.clientHello.delegatedCredentials,
 		Fingerprint:                pskBinder,
 	}
 

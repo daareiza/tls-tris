@@ -75,18 +75,18 @@ type kex interface {
 	// generate generates an ephemeral key. The caller must ensure that a
 	// valid curve or field is given. Returns a new ephemeral secret and
 	// public key on success and an error on failure.
-	generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShare, error)
+	generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShareEntry, error)
 
 	// keyAgreementClient derives a shared secret for the client given the
 	// server's public key share and the client's private key.
 	// It returns a shared secret in case of success or an error otherwise.
-	keyAgreementClient(ks keyShare, privateKey []byte) ([]byte, error)
+	keyAgreementClient(ks keyShareEntry, privateKey []byte) ([]byte, error)
 
 	// keyAgreementServer derives a shared secret for the server using the
 	// public key provided by the client and a randomly generated secret.
 	// It returns the shared secret and the server's public key on success
 	// or an error otherwise.
-	keyAgreementServer(rand io.Reader, ks keyShare) ([]byte, keyShare, error)
+	keyAgreementServer(rand io.Reader, ks keyShareEntry) ([]byte, keyShareEntry, error)
 }
 
 // defaultServerKEX is an abstract class defining default, common behaviour on
@@ -96,18 +96,18 @@ type defaultServerKEX struct{}
 // defaultServerKEX is an abstract class defining default implementation of
 // server side key agreement. It generates ephemeral key and uses it together
 // with client public part in order to calculate shared secret.
-func (defaultServerKEX) keyAgreementServer(rand io.Reader, clientKS keyShare) ([]byte, keyShare, error) {
+func (defaultServerKEX) keyAgreementServer(rand io.Reader, clientKS keyShareEntry) ([]byte, keyShareEntry, error) {
 	// The first parameter does not exactly matter, this implementation
 	// assumes that both roles perform the same computations.
 	privateKey, publicKey, err := generateKeyShare(false, rand, clientKS.group)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 
 	// Use same key agreement implementation as on the client side
 	ss, err := keyAgreementClient(clientKS, privateKey)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	return ss, publicKey, nil
 }
@@ -129,10 +129,10 @@ type kexHybridSIKEp503X25519 struct {
 
 // Routing map for key exchange strategies
 var kexStrat = map[CurveID]kex{
-	CurveP256:                &kexNIST{},
-	CurveP384:                &kexNIST{},
-	CurveP521:                &kexNIST{},
-	X25519:                   &kexX25519{},
+	CurveP256: &kexNIST{},
+	CurveP384: &kexNIST{},
+	CurveP521: &kexNIST{},
+	X25519:    &kexX25519{},
 	HybridSIDHp503Curve25519: &kexHybridSIDHp503X25519{},
 	HybridSIKEp503Curve25519: &kexHybridSIKEp503X25519{},
 }
@@ -230,9 +230,9 @@ func (hs *serverHandshakeState) doTLS13Handshake() error {
 
 	hs.c.cipherSuite, hs.hello.cipherSuite = hs.suite.id, hs.suite.id
 	// When picking the group for the handshake, priority is given to groups
-	// that the client provided a keyShare for, so to avoid a round-trip.
+	// that the client provided a keyShareEntry for, so to avoid a round-trip.
 	// After that the order of CurvePreferences is respected.
-	var ks keyShare
+	var ks keyShareEntry
 CurvePreferenceLoop:
 	for _, curveID := range config.curvePreferences() {
 		for _, keyShare := range hs.clientHello.keyShares {
@@ -338,7 +338,7 @@ CurvePreferenceLoop:
 	if hs.hello13Enc.earlyData {
 		c.in.setCipher(c.vers, earlyClientCipher)
 		c.phase = readingEarlyData
-	} else if hs.clientHello.earlyData {
+	} else if hs.clientHello.hasEarlyData {
 		c.in.setCipher(c.vers, hs.hsClientCipher)
 		c.phase = discardingEarlyData
 	} else {
@@ -479,16 +479,16 @@ func (hs *serverHandshakeState) sendCertificate13() error {
 	if len(certEntries) > 0 && hs.clientHello.ocspStapling {
 		certEntries[0].ocspStaple = hs.cert.OCSPStaple
 	}
-	if len(certEntries) > 0 && hs.clientHello.scts {
+	if len(certEntries) > 0 && hs.clientHello.sctListSupported {
 		certEntries[0].sctList = hs.cert.SignedCertificateTimestamps
 	}
 
-	// If hs.delegatedCredential is set (see hs.readClientHello()) then the
+	// If hs.delegatedCredentials is set (see hs.readClientHello()) then the
 	// server is using the delegated credential extension. The DC is added as an
 	// extension to the end-entity certificate, i.e., the last CertificateEntry
 	// of Certificate.certficate_list. (For details, see
 	// https://tools.ietf.org/html/draft-ietf-tls-subcerts-02.)
-	if len(certEntries) > 0 && hs.clientHello.delegatedCredential && hs.delegatedCredential != nil {
+	if len(certEntries) > 0 && hs.clientHello.delegatedCredentials && hs.delegatedCredential != nil {
 		certEntries[0].delegatedCredential = hs.delegatedCredential
 	}
 
@@ -584,7 +584,7 @@ func (hs *serverHandshakeState) selectTLS13SignatureScheme() (sigScheme Signatur
 	}
 
 	for _, ss := range supportedSchemes {
-		for _, cs := range hs.clientHello.supportedSignatureAlgorithms {
+		for _, cs := range hs.clientHello.signatureAlgorithms {
 			if ss == cs {
 				return ss, nil
 			}
@@ -630,20 +630,20 @@ func prepareDigitallySigned(hash crypto.Hash, context string, data []byte) []byt
 	return h.Sum(nil)
 }
 
-// generateKeyShare generates keypair. On success it returns private key and keyShare
-// structure with keyShare.group set to supported group ID (as per 4.2.7 in RFC 8446)
-// and keyShare.data set to public key, third argument is nil. On failure, third returned
+// generateKeyShare generates keypair. On success it returns private key and keyShareEntry
+// structure with keyShareEntry.group set to supported group ID (as per 4.2.7 in RFC 8446)
+// and keyShareEntry.keyExchange set to public key, third argument is nil. On failure, third returned
 // value (an error) contains error message and first two values are undefined.
-func generateKeyShare(isClient bool, rand io.Reader, curveID CurveID) ([]byte, keyShare, error) {
+func generateKeyShare(isClient bool, rand io.Reader, curveID CurveID) ([]byte, keyShareEntry, error) {
 	if val, ok := kexStrat[curveID]; ok {
 		return val.generate(isClient, rand, curveID)
 	}
-	return nil, keyShare{}, errors.New("tls: preferredCurves includes unsupported curve")
+	return nil, keyShareEntry{}, errors.New("tls: preferredCurves includes unsupported curve")
 }
 
 // DH key agreement. ks stores public key, secretKey stores private key used for ephemeral
 // key agreement. Function returns shared secret in case of success or empty slice otherwise.
-func keyAgreementClient(ks keyShare, secretKey []byte) ([]byte, error) {
+func keyAgreementClient(ks keyShareEntry, secretKey []byte) ([]byte, error) {
 	if val, ok := kexStrat[ks.group]; ok {
 		return val.keyAgreementClient(ks, secretKey)
 	}
@@ -651,12 +651,12 @@ func keyAgreementClient(ks keyShare, secretKey []byte) ([]byte, error) {
 }
 
 // keyAgreementServer generates ephemeral keypair on the on the server side
-// and then uses 'keyShare' (client public key) to derive shared secret
-func keyAgreementServer(rand io.Reader, clientKS keyShare) ([]byte, keyShare, error) {
+// and then uses 'keyShareEntry' (client public key) to derive shared secret
+func keyAgreementServer(rand io.Reader, clientKS keyShareEntry) ([]byte, keyShareEntry, error) {
 	if val, ok := kexStrat[clientKS.group]; ok {
 		return val.keyAgreementServer(rand, clientKS)
 	}
-	return nil, keyShare{}, errors.New("unsupported group")
+	return nil, keyShareEntry{}, errors.New("unsupported group")
 }
 
 func hkdfExpandLabel(hash crypto.Hash, secret, hashValue []byte, label string, L int) []byte {
@@ -706,8 +706,8 @@ func (hs *serverHandshakeState) checkPSK() (isResumed bool, alert alert) {
 
 	hash := hashForSuite(hs.suite)
 	hashSize := hash.Size()
-	for i := range hs.clientHello.psks {
-		sessionTicket := append([]uint8{}, hs.clientHello.psks[i].identity...)
+	for i := range hs.clientHello.pskIdentities {
+		sessionTicket := append([]uint8{}, hs.clientHello.pskIdentities[i].identity...)
 		if hs.c.config.SessionTicketSealer != nil {
 			var ok bool
 			sessionTicket, ok = hs.c.config.SessionTicketSealer.Unseal(hs.clientHelloInfo(), sessionTicket)
@@ -727,11 +727,11 @@ func (hs *serverHandshakeState) checkPSK() (isResumed bool, alert alert) {
 		if s.vers != hs.c.vers {
 			continue
 		}
-		clientAge := time.Duration(hs.clientHello.psks[i].obfTicketAge-s.ageAdd) * time.Millisecond
+		clientAge := time.Duration(hs.clientHello.pskIdentities[i].obfuscatedTicketAge-s.ageAdd) * time.Millisecond
 		serverAge := time.Since(time.Unix(int64(s.createdAt), 0))
 		if clientAge-serverAge > ticketAgeSkewAllowance || clientAge-serverAge < -ticketAgeSkewAllowance {
 			// XXX: NSS is off spec and sends obfuscated_ticket_age as seconds
-			clientAge = time.Duration(hs.clientHello.psks[i].obfTicketAge-s.ageAdd) * time.Second
+			clientAge = time.Duration(hs.clientHello.pskIdentities[i].obfuscatedTicketAge-s.ageAdd) * time.Second
 			if clientAge-serverAge > ticketAgeSkewAllowance || clientAge-serverAge < -ticketAgeSkewAllowance {
 				continue
 			}
@@ -757,11 +757,11 @@ func (hs *serverHandshakeState) checkPSK() (isResumed bool, alert alert) {
 		chHash.Write(hs.clientHello.rawTruncated)
 		expectedBinder := hmacOfSum(hash, chHash, binderFinishedKey)
 
-		if subtle.ConstantTimeCompare(expectedBinder, hs.clientHello.psks[i].binder) != 1 {
+		if subtle.ConstantTimeCompare(expectedBinder, hs.clientHello.pskIdentities[i].binder) != 1 {
 			return false, alertDecryptError
 		}
 
-		if i == 0 && hs.clientHello.earlyData {
+		if i == 0 && hs.clientHello.hasEarlyData {
 			// This is a ticket intended to be used for 0-RTT
 			if s.maxEarlyDataLen == 0 {
 				// But we had not tagged it as such.
@@ -980,7 +980,7 @@ func (hs *clientHandshakeState) sendCertificate13(chainToSend *Certificate, cert
 		return fmt.Errorf("tls: client certificate private key of type %T does not implement crypto.Signer", chainToSend.PrivateKey)
 	}
 
-	signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(key.Public(), certReq.supportedSignatureAlgorithms, hs.hello.supportedSignatureAlgorithms, c.vers)
+	signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(key.Public(), certReq.supportedSignatureAlgorithms, hs.hello.signatureAlgorithms, c.vers)
 	if err != nil {
 		hs.c.sendAlert(alertHandshakeFailure)
 		return err
@@ -1044,7 +1044,7 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 	serverCipher, serverHandshakeSecret := hs.keySchedule.prepareCipher(secretHandshakeServer)
 	if c.hand.Len() > 0 {
 		c.sendAlert(alertUnexpectedMessage)
-		return errors.New("tls: unexpected data after Server Hello")
+		return errors.New("tls: unexpected keyExchange after Server Hello")
 	}
 	// Do not change the sender key yet, the server must authenticate first.
 	c.in.setCipher(c.vers, serverCipher)
@@ -1138,7 +1138,7 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 	err, alertCode := verifyPeerHandshakeSignature(
 		certVerifyMsg,
 		pk,
-		hs.hello.supportedSignatureAlgorithms,
+		hs.hello.signatureAlgorithms,
 		hs.keySchedule.transcriptHash.Sum(nil),
 		"TLS 1.3, server CertificateVerify")
 	if err != nil {
@@ -1216,21 +1216,21 @@ func supportedSigAlgorithmsCert(schemes []SignatureScheme) (ret []SignatureSchem
 // Functions below implement kex interface for different DH shared secret agreements
 
 // KEX: P-256, P-384, P-512 KEX
-func (kexNIST) generate(isClient bool, rand io.Reader, groupId CurveID) (private []byte, ks keyShare, err error) {
+func (kexNIST) generate(isClient bool, rand io.Reader, groupId CurveID) (private []byte, ks keyShareEntry, err error) {
 	// never fails
 	curve, _ := curveForCurveID(groupId)
 	private, x, y, err := elliptic.GenerateKey(curve, rand)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	ks.group = groupId
-	ks.data = elliptic.Marshal(curve, x, y)
+	ks.keyExchange = elliptic.Marshal(curve, x, y)
 	return
 }
-func (kexNIST) keyAgreementClient(ks keyShare, secretKey []byte) ([]byte, error) {
+func (kexNIST) keyAgreementClient(ks keyShareEntry, secretKey []byte) ([]byte, error) {
 	// never fails
 	curve, _ := curveForCurveID(ks.group)
-	x, y := elliptic.Unmarshal(curve, ks.data)
+	x, y := elliptic.Unmarshal(curve, ks.keyExchange)
 	if x == nil {
 		return nil, errors.New("tls: Point not on a curve")
 	}
@@ -1246,41 +1246,41 @@ func (kexNIST) keyAgreementClient(ks keyShare, secretKey []byte) ([]byte, error)
 }
 
 // KEX: X25519
-func (kexX25519) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShare, error) {
+func (kexX25519) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShareEntry, error) {
 	var scalar, public [x25519Sz]byte
 	if _, err := io.ReadFull(rand, scalar[:]); err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	curve25519.ScalarBaseMult(&public, &scalar)
-	return scalar[:], keyShare{group: X25519, data: public[:]}, nil
+	return scalar[:], keyShareEntry{group: X25519, keyExchange: public[:]}, nil
 }
 
-func (kexX25519) keyAgreementClient(ks keyShare, secretKey []byte) ([]byte, error) {
+func (kexX25519) keyAgreementClient(ks keyShareEntry, secretKey []byte) ([]byte, error) {
 	var theirPublic, sharedKey, scalar [x25519Sz]byte
-	if len(ks.data) != x25519Sz {
+	if len(ks.keyExchange) != x25519Sz {
 		return nil, errors.New("tls: wrong shared secret size")
 	}
-	copy(theirPublic[:], ks.data)
+	copy(theirPublic[:], ks.keyExchange)
 	copy(scalar[:], secretKey)
 	curve25519.ScalarMult(&sharedKey, &scalar, &theirPublic)
 	return sharedKey[:], nil
 }
 
 // KEX: SIDH/503
-func (kexSIDHp503) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShare, error) {
+func (kexSIDHp503) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShareEntry, error) {
 	var variant, _ = getSidhKeyVariant(isClient)
 	var prvKey = sidh.NewPrivateKey(sidh.FP_503, variant)
 	if prvKey.Generate(rand) != nil {
-		return nil, keyShare{}, errors.New("tls: private SIDH key generation failed")
+		return nil, keyShareEntry{}, errors.New("tls: private SIDH key generation failed")
 	}
 	pubKey := prvKey.GeneratePublicKey()
-	return prvKey.Export(), keyShare{group: 0 /*UNUSED*/, data: pubKey.Export()}, nil
+	return prvKey.Export(), keyShareEntry{group: 0 /*UNUSED*/, keyExchange: pubKey.Export()}, nil
 }
 
-func (kexSIDHp503) keyAgreementClient(isClient bool, ks keyShare, key []byte) ([]byte, error) {
+func (kexSIDHp503) keyAgreementClient(isClient bool, ks keyShareEntry, key []byte) ([]byte, error) {
 	var prvVariant, pubVariant = getSidhKeyVariant(isClient)
 
-	if len(ks.data) != SIDHp503PubKeySz || len(key) != SIDHp503PrvKeySz {
+	if len(ks.keyExchange) != SIDHp503PubKeySz || len(key) != SIDHp503PrvKeySz {
 		return nil, errors.New("tls: wrong key size")
 	}
 
@@ -1290,7 +1290,7 @@ func (kexSIDHp503) keyAgreementClient(isClient bool, ks keyShare, key []byte) ([
 	if err := prvKey.Import(key); err != nil {
 		return nil, errors.New("tls: internal error")
 	}
-	if err := pubKey.Import(ks.data); err != nil {
+	if err := pubKey.Import(ks.keyExchange); err != nil {
 		return nil, errors.New("tls: internal error")
 	}
 
@@ -1300,7 +1300,7 @@ func (kexSIDHp503) keyAgreementClient(isClient bool, ks keyShare, key []byte) ([
 }
 
 // KEX Hybrid SIDH/503-X25519
-func (kex *kexHybridSIDHp503X25519) generate(isClient bool, rand io.Reader, groupId CurveID) (private []byte, ks keyShare, err error) {
+func (kex *kexHybridSIDHp503X25519) generate(isClient bool, rand io.Reader, groupId CurveID) (private []byte, ks keyShareEntry, err error) {
 	var pubHybrid [SIDHp503Curve25519PubKeySz]byte
 	var prvHybrid [SIDHp503Curve25519PrvKeySz]byte
 
@@ -1310,7 +1310,7 @@ func (kex *kexHybridSIDHp503X25519) generate(isClient bool, rand io.Reader, grou
 		return
 	}
 	copy(prvHybrid[:], private)
-	copy(pubHybrid[:], ks.data)
+	copy(pubHybrid[:], ks.keyExchange)
 
 	// Generate PQ ephemeral key for SIDH
 	private, ks, err = kex.pqKEX.generate(isClient, rand, groupId)
@@ -1318,18 +1318,18 @@ func (kex *kexHybridSIDHp503X25519) generate(isClient bool, rand io.Reader, grou
 		return
 	}
 	copy(prvHybrid[x25519Sz:], private)
-	copy(pubHybrid[x25519Sz:], ks.data)
-	return prvHybrid[:], keyShare{group: HybridSIDHp503Curve25519, data: pubHybrid[:]}, nil
+	copy(pubHybrid[x25519Sz:], ks.keyExchange)
+	return prvHybrid[:], keyShareEntry{group: HybridSIDHp503Curve25519, keyExchange: pubHybrid[:]}, nil
 }
 
-func (kex *kexHybridSIDHp503X25519) computeSharedSecret(isClient bool, theirsKS keyShare, key []byte) ([]byte, error) {
+func (kex *kexHybridSIDHp503X25519) computeSharedSecret(isClient bool, theirsKS keyShareEntry, key []byte) ([]byte, error) {
 	var sharedKey [SIDHp503Curve25519SharedKeySz]byte
 	var ret []byte
-	var tmpKs keyShare
+	var tmpKs keyShareEntry
 
 	// Key agreement for classic
 	tmpKs.group = X25519
-	tmpKs.data = theirsKS.data[:x25519Sz]
+	tmpKs.keyExchange = theirsKS.keyExchange[:x25519Sz]
 	ret, err := kex.classicKEX.keyAgreementClient(tmpKs, key[:x25519Sz])
 	if err != nil {
 		return nil, err
@@ -1338,7 +1338,7 @@ func (kex *kexHybridSIDHp503X25519) computeSharedSecret(isClient bool, theirsKS 
 
 	// Key agreement for PQ
 	tmpKs.group = 0 /*UNUSED*/
-	tmpKs.data = theirsKS.data[x25519Sz:]
+	tmpKs.keyExchange = theirsKS.keyExchange[x25519Sz:]
 	ret, err = kex.pqKEX.keyAgreementClient(isClient, tmpKs, key[x25519Sz:])
 	if err != nil {
 		return nil, err
@@ -1347,47 +1347,47 @@ func (kex *kexHybridSIDHp503X25519) computeSharedSecret(isClient bool, theirsKS 
 	return sharedKey[:], nil
 }
 
-func (kex *kexHybridSIDHp503X25519) keyAgreementClient(theirsKS keyShare, key []byte) ([]byte, error) {
+func (kex *kexHybridSIDHp503X25519) keyAgreementClient(theirsKS keyShareEntry, key []byte) ([]byte, error) {
 	return kex.computeSharedSecret(true, theirsKS, key)
 }
 
-func (kex *kexHybridSIDHp503X25519) keyAgreementServer(rand io.Reader, clientKS keyShare) ([]byte, keyShare, error) {
+func (kex *kexHybridSIDHp503X25519) keyAgreementServer(rand io.Reader, clientKS keyShareEntry) ([]byte, keyShareEntry, error) {
 	privateKey, publicKey, err := generateKeyShare(false, rand, clientKS.group)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 
 	ss, err := kex.computeSharedSecret(false, clientKS, privateKey)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	return ss, publicKey, nil
 }
 
 // generate method generates SIKE key pair (ephemeral) on client side
-func (kexSIKEp503) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShare, error) {
+func (kexSIKEp503) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShareEntry, error) {
 	if !isClient {
-		return nil, keyShare{}, errors.New("tls: internal error")
+		return nil, keyShareEntry{}, errors.New("tls: internal error")
 	}
 
 	var prvKey = sidh.NewPrivateKey(sidh.FP_503, sidh.KeyVariant_SIKE)
 	if prvKey.Generate(rand) != nil {
-		return nil, keyShare{}, errors.New("tls: private SIDH key generation failed")
+		return nil, keyShareEntry{}, errors.New("tls: private SIDH key generation failed")
 	}
 	var pubKey = prvKey.GeneratePublicKey()
-	var ks = keyShare{data: pubKey.Export()}
+	var ks = keyShareEntry{keyExchange: pubKey.Export()}
 
 	// 'buf' is a concatenation of (private || public) key. I need public key
 	// when decapsulating in kexSIKEp503::keyAgreementClient.
 	var buf = make([]byte, prvKey.Size()+pubKey.Size())
 	copy(buf, prvKey.Export())
-	copy(buf[prvKey.Size():], ks.data)
+	copy(buf[prvKey.Size():], ks.keyExchange)
 	return buf, ks, nil
 }
 
 // keyAgreementClient performs KEM decapsulation. 'privateKey' is a concatenation
 // of (private || public) key
-func (kexSIKEp503) keyAgreementClient(theirsKS keyShare, privateKey []byte) ([]byte, error) {
+func (kexSIKEp503) keyAgreementClient(theirsKS keyShareEntry, privateKey []byte) ([]byte, error) {
 	// Import private key
 	var prvKey = sidh.NewPrivateKey(sidh.FP_503, sidh.KeyVariant_SIKE)
 	var pubKey = sidh.NewPublicKey(sidh.FP_503, sidh.KeyVariant_SIKE)
@@ -1400,7 +1400,7 @@ func (kexSIKEp503) keyAgreementClient(theirsKS keyShare, privateKey []byte) ([]b
 	prvKey.Import(privateKey[:prvKey.Size()])
 	pubKey.Import(privateKey[prvKey.Size():])
 
-	ss, err := sike.Decapsulate(prvKey, pubKey, theirsKS.data)
+	ss, err := sike.Decapsulate(prvKey, pubKey, theirsKS.keyExchange)
 	if err != nil {
 		return nil, err
 	}
@@ -1408,60 +1408,60 @@ func (kexSIKEp503) keyAgreementClient(theirsKS keyShare, privateKey []byte) ([]b
 }
 
 // keyAgreementServer performs KEM encapsulation.
-func (kexSIKEp503) keyAgreementServer(rand io.Reader, theirsKS keyShare) ([]byte, keyShare, error) {
+func (kexSIKEp503) keyAgreementServer(rand io.Reader, theirsKS keyShareEntry) ([]byte, keyShareEntry, error) {
 	pubKey := sidh.NewPublicKey(sidh.FP_503, sidh.KeyVariant_SIKE)
-	if pubKey.Import(theirsKS.data) != nil {
-		return nil, keyShare{}, errors.New("tls: can't import public SIKE key")
+	if pubKey.Import(theirsKS.keyExchange) != nil {
+		return nil, keyShareEntry{}, errors.New("tls: can't import public SIKE key")
 	}
 	ct, key, err := sike.Encapsulate(rand, pubKey)
 	if err != nil {
-		return nil, keyShare{}, errors.New("tls: SIKE encapsulation failed")
+		return nil, keyShareEntry{}, errors.New("tls: SIKE encapsulation failed")
 	}
-	return key, keyShare{data: ct}, nil
+	return key, keyShareEntry{keyExchange: ct}, nil
 }
 
 // KEX Hybrid SIKEp503-X25519
-func (kex *kexHybridSIKEp503X25519) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShare, error) {
+func (kex *kexHybridSIKEp503X25519) generate(isClient bool, rand io.Reader, groupId CurveID) ([]byte, keyShareEntry, error) {
 	var pubHybrid [SIKEp503Curve25519PubKeySz]byte
 	var prvHybrid [SIKEp503Curve25519PrvKeySz + SIDHp503PubKeySz]byte
 
 	// Generate ephemeral key for classic x25519
 	private, ks, err := kex.classicKEX.generate(isClient, rand, 0)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	copy(prvHybrid[:], private)
-	copy(pubHybrid[:], ks.data)
+	copy(pubHybrid[:], ks.keyExchange)
 
 	// Generate PQ ephemeral key for SIDH
 	private, ks, err = kex.pqKEX.generate(isClient, rand, 0)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	copy(prvHybrid[x25519Sz:], private)
-	copy(pubHybrid[x25519Sz:], ks.data)
-	return prvHybrid[:], keyShare{group: HybridSIKEp503Curve25519, data: pubHybrid[:]}, nil
+	copy(pubHybrid[x25519Sz:], ks.keyExchange)
+	return prvHybrid[:], keyShareEntry{group: HybridSIKEp503Curve25519, keyExchange: pubHybrid[:]}, nil
 }
 
-// keyAgreementClient performs X25519-SIKEp503 key agreement on client side. 'theirsKS.data' contains
+// keyAgreementClient performs X25519-SIKEp503 key agreement on client side. 'theirsKS.keyExchange' contains
 // X25519 public key and SIKEp503 KEM generated by the server. 'privateKey' is a key stored
 // locally by the process. It is a concatenation of (X25519 || SIKEp503 private || SIKEp503 public) keys.
 // In case of success concatenation of (X25519||SIKEp503) shared secrets is returned (32+16 bytes).
-func (kex *kexHybridSIKEp503X25519) keyAgreementClient(theirsKS keyShare, privateKey []byte) ([]byte, error) {
+func (kex *kexHybridSIKEp503X25519) keyAgreementClient(theirsKS keyShareEntry, privateKey []byte) ([]byte, error) {
 	var ssHyb [SIKEp503Curve25519SharedKeySz]byte
-	var tmpKs keyShare
+	var tmpKs keyShareEntry
 
 	if len(privateKey) != SIKEp503Curve25519PrvKeySz+SIDHp503PubKeySz {
 		return nil, errors.New("tls: internal error")
 	}
 
-	if len(theirsKS.data) != SIKEp503Curve25519CtSz {
+	if len(theirsKS.keyExchange) != SIKEp503Curve25519CtSz {
 		return nil, errors.New("tls: wrong key size for X25519-SIKEp503")
 	}
 
 	// Key agreement for classic
 	tmpKs.group = X25519
-	tmpKs.data = theirsKS.data[:x25519Sz]
+	tmpKs.keyExchange = theirsKS.keyExchange[:x25519Sz]
 	ret, err := kex.classicKEX.keyAgreementClient(tmpKs, privateKey[:x25519Sz])
 	if err != nil {
 		return nil, err
@@ -1470,7 +1470,7 @@ func (kex *kexHybridSIKEp503X25519) keyAgreementClient(theirsKS keyShare, privat
 
 	// Key agreement for PQ
 	tmpKs.group = 0 /*UNUSED*/
-	tmpKs.data = theirsKS.data[x25519Sz:]
+	tmpKs.keyExchange = theirsKS.keyExchange[x25519Sz:]
 	ret, err = kex.pqKEX.keyAgreementClient(tmpKs, privateKey[x25519Sz:])
 	if err != nil {
 		return nil, err
@@ -1483,29 +1483,29 @@ func (kex *kexHybridSIKEp503X25519) keyAgreementClient(theirsKS keyShare, privat
 // contains concatenation of public keys for both X25519 and SIKEp503. In case of success
 // function returns X25519 and SIKEp503 shaerd secret concatenated together and concatenation of
 // X25519 public and SIKEp503 ciphertext that are sent to the client.
-func (kex *kexHybridSIKEp503X25519) keyAgreementServer(rand io.Reader, theirsKS keyShare) ([]byte, keyShare, error) {
+func (kex *kexHybridSIKEp503X25519) keyAgreementServer(rand io.Reader, theirsKS keyShareEntry) ([]byte, keyShareEntry, error) {
 	var ssHyb [SIKEp503Curve25519SharedKeySz]byte
 	var ret [SIKEp503Curve25519CtSz]byte
 
-	if len(theirsKS.data) != SIKEp503Curve25519PubKeySz {
-		return nil, keyShare{}, errors.New("tls: wrong key size for X25519-SIKEp503")
+	if len(theirsKS.keyExchange) != SIKEp503Curve25519PubKeySz {
+		return nil, keyShareEntry{}, errors.New("tls: wrong key size for X25519-SIKEp503")
 	}
 
-	var tmpKs = keyShare{group: X25519, data: theirsKS.data[:x25519Sz]}
+	var tmpKs = keyShareEntry{group: X25519, keyExchange: theirsKS.keyExchange[:x25519Sz]}
 	ss, srvKs, err := kex.classicKEX.keyAgreementServer(rand, tmpKs)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	copy(ssHyb[:], ss[:])
-	copy(ret[:], srvKs.data[:])
+	copy(ret[:], srvKs.keyExchange[:])
 
 	tmpKs.group = 0 /*UNUSED*/
-	tmpKs.data = theirsKS.data[x25519Sz:]
+	tmpKs.keyExchange = theirsKS.keyExchange[x25519Sz:]
 	ss, srvKs, err = kex.pqKEX.keyAgreementServer(rand, tmpKs)
 	if err != nil {
-		return nil, keyShare{}, err
+		return nil, keyShareEntry{}, err
 	}
 	copy(ssHyb[x25519Sz:], ss[:])
-	copy(ret[x25519Sz:], srvKs.data[:SIKEp503CtSz])
-	return ssHyb[:], keyShare{group: HybridSIKEp503Curve25519, data: ret[:]}, nil
+	copy(ret[x25519Sz:], srvKs.keyExchange[:SIKEp503CtSz])
+	return ssHyb[:], keyShareEntry{group: HybridSIKEp503Curve25519, keyExchange: ret[:]}, nil
 }

@@ -59,15 +59,15 @@ func makeClientHello(config *Config) (*clientHelloMsg, error) {
 		compressionMethods:           []uint8{compressionNone},
 		random:                       make([]byte, 32),
 		ocspStapling:                 true,
-		scts:                         true,
+		sctListSupported:             true,
 		serverName:                   hostnameInSNI(config.ServerName),
 		supportedCurves:              config.curvePreferences(),
 		supportedPoints:              []uint8{pointFormatUncompressed},
 		nextProtoNeg:                 len(config.NextProtos) > 0,
 		secureRenegotiationSupported: true,
-		delegatedCredential:          config.AcceptDelegatedCredential,
+		delegatedCredentials:         config.AcceptDelegatedCredential,
 		alpnProtocols:                config.NextProtos,
-		extendedMSSupported:          config.UseExtendedMasterSecret,
+		extendedMasterSecret:         config.UseExtendedMasterSecret,
 	}
 	possibleCipherSuites := config.cipherSuites()
 	hello.cipherSuites = make([]uint16, 0, len(possibleCipherSuites))
@@ -99,7 +99,7 @@ NextCipherSuite:
 	}
 
 	if hello.vers >= VersionTLS12 {
-		hello.supportedSignatureAlgorithms = supportedSignatureAlgorithms
+		hello.signatureAlgorithms = supportedSignatureAlgorithms
 	}
 
 	if hello.vers >= VersionTLS13 {
@@ -107,8 +107,8 @@ NextCipherSuite:
 		// set legacy_version to TLS 1.2 for backwards compatibility.
 		hello.vers = VersionTLS12
 		hello.supportedVersions = config.getSupportedVersions()
-		hello.supportedSignatureAlgorithms = supportedSignatureAlgorithms13
-		hello.supportedSignatureAlgorithmsCert = supportedSigAlgorithmsCert(supportedSignatureAlgorithms13)
+		hello.signatureAlgorithms = supportedSignatureAlgorithms13
+		hello.signatureAlgorithmsCert = supportedSigAlgorithmsCert(supportedSignatureAlgorithms13)
 	}
 
 	return hello, nil
@@ -189,7 +189,7 @@ func (c *Conn) clientHandshake() error {
 		session: session,
 	}
 
-	var clientKS keyShare
+	var clientKS keyShareEntry
 	if c.config.maxVersion() >= VersionTLS13 {
 		// Create one keyshare for the first default curve. If it is not
 		// appropriate, the server should raise a HRR.
@@ -199,7 +199,7 @@ func (c *Conn) clientHandshake() error {
 			c.sendAlert(alertInternalError)
 			return err
 		}
-		hello.keyShares = []keyShare{clientKS}
+		hello.keyShares = []keyShareEntry{clientKS}
 		// middlebox compatibility mode, provide a non-empty session ID
 		hello.sessionId = make([]byte, 16)
 		if _, err := io.ReadFull(c.config.rand(), hello.sessionId); err != nil {
@@ -425,7 +425,7 @@ func (hs *clientHandshakeState) processDelegatedCredentialFromServer(serialized 
 	var err error
 	if serialized != nil {
 		// Assert that the DC extension was indicated by the client.
-		if !hs.hello.delegatedCredential {
+		if !hs.hello.delegatedCredentials {
 			c.sendAlert(alertUnexpectedMessage)
 			return errors.New("tls: got delegated credential extension without indication")
 		}
@@ -606,7 +606,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			return fmt.Errorf("tls: client certificate private key of type %T does not implement crypto.Signer", chainToSend.PrivateKey)
 		}
 
-		signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(key.Public(), certReq.supportedSignatureAlgorithms, hs.hello.supportedSignatureAlgorithms, c.vers)
+		signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(key.Public(), certReq.supportedSignatureAlgorithms, hs.hello.signatureAlgorithms, c.vers)
 		if err != nil {
 			c.sendAlert(alertInternalError)
 			return err
@@ -697,7 +697,7 @@ func (hs *clientHandshakeState) processServerHello() (bool, error) {
 	}
 
 	if hs.serverHello.extendedMSSupported {
-		if hs.hello.extendedMSSupported {
+		if hs.hello.extendedMasterSecret {
 			c.useEMS = true
 		} else {
 			// server wants to calculate master secret in a different way than client

@@ -150,32 +150,32 @@ func (*clientHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 		}
 	}
 	if rand.Intn(10) > 5 {
-		m.supportedSignatureAlgorithms = supportedSignatureAlgorithms
+		m.signatureAlgorithms = supportedSignatureAlgorithms
 	}
 	m.alpnProtocols = make([]string, rand.Intn(5))
 	for i := range m.alpnProtocols {
 		m.alpnProtocols[i] = randomString(rand.Intn(20)+1, rand)
 	}
 	if rand.Intn(10) > 5 {
-		m.scts = true
+		m.sctListSupported = true
 	}
-	m.keyShares = make([]keyShare, rand.Intn(4))
+	m.keyShares = make([]keyShareEntry, rand.Intn(4))
 	for i := range m.keyShares {
 		m.keyShares[i].group = CurveID(rand.Intn(30000))
-		m.keyShares[i].data = randomBytes(rand.Intn(300)+1, rand)
+		m.keyShares[i].keyExchange = randomBytes(rand.Intn(300)+1, rand)
 	}
 	m.supportedVersions = make([]uint16, rand.Intn(5))
 	for i := range m.supportedVersions {
 		m.supportedVersions[i] = uint16(rand.Intn(30000))
 	}
 	if rand.Intn(10) > 5 {
-		m.earlyData = true
+		m.hasEarlyData = true
 	}
 	if rand.Intn(10) > 5 {
-		m.delegatedCredential = true
+		m.delegatedCredentials = true
 	}
 	if rand.Intn(10) > 5 {
-		m.extendedMSSupported = true
+		m.extendedMasterSecret = true
 	}
 	return reflect.ValueOf(m)
 }
@@ -219,7 +219,7 @@ func (*serverHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 
 	if rand.Intn(10) > 5 {
 		m.keyShare.group = CurveID(rand.Intn(30000) + 1)
-		m.keyShare.data = randomBytes(rand.Intn(300)+1, rand)
+		m.keyShare.keyExchange = randomBytes(rand.Intn(300)+1, rand)
 	}
 	if rand.Intn(10) > 5 {
 		m.psk = true

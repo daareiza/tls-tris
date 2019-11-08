@@ -7,6 +7,7 @@ package tls
 import (
 	"container/list"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha512"
 	"crypto/x509"
@@ -29,6 +30,14 @@ const (
 	VersionTLS12 = 0x0303
 	VersionTLS13 = 0x0304
 )
+
+var allTLSWireVersions = []uint16{
+	VersionTLS13,
+	VersionTLS12,
+	VersionTLS11,
+	VersionTLS10,
+	VersionSSL30,
+}
 
 const (
 	maxPlaintext      = 16384        // maximum plaintext payload length
@@ -53,21 +62,27 @@ const (
 
 // TLS handshake message types.
 const (
-	typeHelloRequest        uint8 = 0
-	typeClientHello         uint8 = 1
-	typeServerHello         uint8 = 2
-	typeNewSessionTicket    uint8 = 4
-	typeEndOfEarlyData      uint8 = 5
-	typeEncryptedExtensions uint8 = 8
-	typeCertificate         uint8 = 11
-	typeServerKeyExchange   uint8 = 12
-	typeCertificateRequest  uint8 = 13
-	typeServerHelloDone     uint8 = 14
-	typeCertificateVerify   uint8 = 15
-	typeClientKeyExchange   uint8 = 16
-	typeFinished            uint8 = 20
-	typeCertificateStatus   uint8 = 22
-	typeNextProtocol        uint8 = 67 // Not IANA assigned
+	typeHelloRequest          uint8 = 0
+	typeClientHello           uint8 = 1
+	typeServerHello           uint8 = 2
+	typeHelloVerifyRequest    uint8 = 3
+	typeNewSessionTicket      uint8 = 4
+	typeEndOfEarlyData        uint8 = 5
+	typeHelloRetryRequest     uint8 = 6
+	typeEncryptedExtensions   uint8 = 8
+	typeCertificate           uint8 = 11
+	typeServerKeyExchange     uint8 = 12
+	typeCertificateRequest    uint8 = 13
+	typeServerHelloDone       uint8 = 14
+	typeCertificateVerify     uint8 = 15
+	typeClientKeyExchange     uint8 = 16
+	typeFinished              uint8 = 20
+	typeCertificateStatus     uint8 = 22
+	typeKeyUpdate             uint8 = 24
+	typeCompressedCertificate uint8 = 25  // Not IANA assigned
+	typeNextProtocol          uint8 = 67  // Not IANA assigned
+	typeChannelID             uint8 = 203 // Not IANA assigned
+	typeMessageHash           uint8 = 254
 )
 
 // TLS compression types.
@@ -77,25 +92,34 @@ const (
 
 // TLS extension numbers
 const (
-	extensionServerName              uint16 = 0
-	extensionStatusRequest           uint16 = 5
-	extensionSupportedCurves         uint16 = 10 // Supported Groups in 1.3 nomenclature
-	extensionSupportedPoints         uint16 = 11
-	extensionSignatureAlgorithms     uint16 = 13
-	extensionALPN                    uint16 = 16
-	extensionSCT                     uint16 = 18 // https://tools.ietf.org/html/rfc6962#section-6
-	extensionEMS                     uint16 = 23
-	extensionSessionTicket           uint16 = 35
-	extensionPreSharedKey            uint16 = 41
-	extensionEarlyData               uint16 = 42
-	extensionSupportedVersions       uint16 = 43
-	extensionPSKKeyExchangeModes     uint16 = 45
-	extensionCAs                     uint16 = 47
-	extensionSignatureAlgorithmsCert uint16 = 50
-	extensionKeyShare                uint16 = 51
-	extensionNextProtoNeg            uint16 = 13172 // not IANA assigned
-	extensionRenegotiationInfo       uint16 = 0xff01
-	extensionDelegatedCredential     uint16 = 0xff02 // TODO(any) Get IANA assignment
+	extensionServerName                 uint16 = 0
+	extensionStatusRequest              uint16 = 5
+	extensionSupportedCurves            uint16 = 10 // Supported Groups in 1.3 nomenclature
+	extensionSupportedPoints            uint16 = 11
+	extensionSignatureAlgorithms        uint16 = 13
+	extensionUseSRTP                    uint16 = 14
+	extensionALPN                       uint16 = 16
+	extensionSignedCertificateTimestamp uint16 = 18 // https://tools.ietf.org/html/rfc6962#section-6
+	extensionPadding                    uint16 = 21
+	extensionExtendedMasterSecret       uint16 = 23
+	extensionTokenBinding               uint16 = 24
+	extensionCompressedCertAlgs         uint16 = 27
+	extensionSessionTicket              uint16 = 35
+	extensionPreSharedKey               uint16 = 41
+	extensionEarlyData                  uint16 = 42
+	extensionSupportedVersions          uint16 = 43
+	extensionCookie                     uint16 = 44
+	extensionPSKKeyExchangeModes        uint16 = 45
+	extensionCertificateAuthorities     uint16 = 47
+	extensionSignatureAlgorithmsCert    uint16 = 50
+	extensionKeyShare                   uint16 = 51
+	extensionCustom                     uint16 = 1234  // not IANA assigned
+	extensionNextProtoNeg               uint16 = 13172 // not IANA assigned
+	extensionRenegotiationInfo          uint16 = 0xff01
+	extensionQUICTransportParams        uint16 = 0xffa5 // draft-ietf-quic-tls-13
+	extensionChannelID                  uint16 = 30032  // not IANA assigned
+	extensionDelegatedCredentials       uint16 = 0xff02 // TODO(any) Get IANA assignment
+	extensionPQExperimentSignal         uint16 = 54538
 )
 
 // TLS signaling cipher suite values
@@ -103,10 +127,23 @@ const (
 	scsvRenegotiation uint16 = 0x00ff
 )
 
+var tls13HelloRetryRequest = []uint8{
+	0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c,
+	0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb,
+	0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+}
+
 // PSK Key Exchange Modes
 // https://tools.ietf.org/html/draft-ietf-tls-tls13-18#section-4.2.7
 const (
+	pskKeyExchange    uint8 = 0
 	pskDHEKeyExchange uint8 = 1
+)
+
+// KeyUpdateRequest values (see RFC 8446, section 4.6.3)
+const (
+	keyUpdateNotRequested = 0
+	keyUpdateRequested    = 1
 )
 
 // CurveID is the type of a TLS identifier for an elliptic curve. See
@@ -118,10 +155,12 @@ type CurveID uint16
 
 const (
 	// Exported IDs
-	CurveP256 CurveID = 23
-	CurveP384 CurveID = 24
-	CurveP521 CurveID = 25
-	X25519    CurveID = 29
+	CurveP224   CurveID = 21
+	CurveP256   CurveID = 23
+	CurveP384   CurveID = 24
+	CurveP521   CurveID = 25
+	X25519      CurveID = 29
+	CurveCECPQ2 CurveID = 16696
 
 	// Experimental KEX
 	HybridSIDHp503Curve25519 CurveID = 0xFE30
@@ -130,24 +169,32 @@ const (
 
 // TLS 1.3 Key Share
 // See https://tools.ietf.org/html/draft-ietf-tls-tls13-18#section-4.2.5
-type keyShare struct {
-	group CurveID
-	data  []byte
+type keyShareEntry struct {
+	group       CurveID
+	keyExchange []byte
 }
+
+// SRTP protection profiles (See RFC 5764, section 4.1.2)
+const (
+	SRTP_AES128_CM_HMAC_SHA1_80 uint16 = 0x0001
+	SRTP_AES128_CM_HMAC_SHA1_32        = 0x0002
+)
 
 // TLS 1.3 PSK Identity and Binder, as sent by the client
 // https://tools.ietf.org/html/draft-ietf-tls-tls13-18#section-4.2.6
 
-type psk struct {
-	identity     []byte
-	obfTicketAge uint32
-	binder       []byte
+type pskIdentity struct {
+	identity            []byte
+	binder              []byte
+	ticket              []uint8
+	obfuscatedTicketAge uint32
 }
 
 // TLS Elliptic Curve Point Formats
 // http://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-9
 const (
-	pointFormatUncompressed uint8 = 0
+	pointFormatUncompressed    uint8 = 0
+	pointFormatCompressedPrime uint8 = 1
 )
 
 // TLS CertificateStatusType (RFC 3546)
@@ -178,7 +225,7 @@ const (
 	signatureRSAPSS
 )
 
-// supportedSignatureAlgorithms contains the signature and hash algorithms that
+// signatureAlgorithms contains the signature and hash algorithms that
 // the code advertises as supported in a TLS 1.2 ClientHello and in a TLS 1.2
 // CertificateRequest. The two fields are merged to match with TLS 1.3.
 // Note that in TLS 1.2, the ECDSA algorithms are not constrained to P-256, etc.
@@ -221,9 +268,13 @@ type ConnectionState struct {
 	ServerName                  string                // server name requested by client, if any (server side only)
 	PeerCertificates            []*x509.Certificate   // certificate chain presented by remote peer
 	VerifiedChains              [][]*x509.Certificate // verified chains built from PeerCertificates
+	ChannelID                   *ecdsa.PublicKey      // the channel ID for this connection
 	SignedCertificateTimestamps [][]byte              // SCTs from the server, if any
 	OCSPResponse                []byte                // stapled OCSP response from server, if any
 	DelegatedCredential         []byte                // Delegated credential sent by the server, if any
+	TokenBindingNegotiated      bool                  // whether Token Binding was negotiated
+	TokenBindingParam           uint8                 // the negotiated Token Binding key parameter
+	SRTPProtectionProfile       uint16                // the negotiated DTLS-SRTP protection profile
 
 	// TLSUnique contains the "tls-unique" channel binding value (see RFC
 	// 5929, section 3). For resumed sessions this value will be nil
@@ -243,6 +294,11 @@ type ConnectionState struct {
 	Unique0RTTToken []byte
 
 	ClientHello []byte // ClientHello packet
+
+	SCTList                []byte          // signed certificate timestamp list
+	PeerSignatureAlgorithm SignatureScheme // algorithm used by the peer in the handshake
+	CurveID                CurveID         // the curve used in ECDHE
+	QUICTransportParams    []byte          // the QUIC transport params received from the peer
 }
 
 // ClientAuthType declares the policy the server will follow for
@@ -260,13 +316,24 @@ const (
 // ClientSessionState contains the state needed by clients to resume TLS
 // sessions.
 type ClientSessionState struct {
-	sessionTicket      []uint8               // Encrypted ticket used for session resumption with server
-	vers               uint16                // SSL/TLS version negotiated for the session
-	cipherSuite        uint16                // Ciphersuite negotiated for the session
-	masterSecret       []byte                // MasterSecret generated by client on a full handshake
-	serverCertificates []*x509.Certificate   // Certificate chain presented by the server
-	verifiedChains     [][]*x509.Certificate // Certificate chains we built for verification
-	useEMS             bool                  // State of extended master secret
+	sessionId            []uint8               // Session ID supplied by the server. nil if the session has a ticket.
+	sessionTicket        []uint8               // Encrypted ticket used for session resumption with server
+	vers                 uint16                // SSL/TLS version negotiated for the session
+	wireVersion          uint16                // Wire SSL/TLS version negotiated for the session
+	cipherSuite          uint16                // Ciphersuite negotiated for the session
+	masterSecret         []byte                // MasterSecret generated by client on a full handshake
+	handshakeHash        []byte                // Handshake hash for Channel ID purposes.
+	serverCertificates   []*x509.Certificate   // Certificate chain presented by the server
+	extendedMasterSecret bool                  // Whether an extended master secret was used to generate the session
+	verifiedChains       [][]*x509.Certificate // Certificate chains we built for verification
+	useEMS               bool                  // State of extended master secret
+	sctList              []byte
+	ocspResponse         []byte
+	earlyALPN            string
+	ticketCreationTime   time.Time
+	ticketExpiration     time.Time
+	ticketAgeAdd         uint32
+	maxEarlyDataSize     uint32
 }
 
 // ClientSessionCache is a cache of ClientSessionState objects that can be used
@@ -288,18 +355,26 @@ type ClientSessionCache interface {
 type SignatureScheme uint16
 
 const (
+	// RSASSA-PKCS1-v1_5 algorithms
+	PKCS1WithMD5    SignatureScheme = 0x0101
 	PKCS1WithSHA1   SignatureScheme = 0x0201
 	PKCS1WithSHA256 SignatureScheme = 0x0401
 	PKCS1WithSHA384 SignatureScheme = 0x0501
 	PKCS1WithSHA512 SignatureScheme = 0x0601
 
+	// RSASSA-PSS algorithms
 	PSSWithSHA256 SignatureScheme = 0x0804
 	PSSWithSHA384 SignatureScheme = 0x0805
 	PSSWithSHA512 SignatureScheme = 0x0806
 
+	// ECDSA algorithms
 	ECDSAWithP256AndSHA256 SignatureScheme = 0x0403
 	ECDSAWithP384AndSHA384 SignatureScheme = 0x0503
 	ECDSAWithP521AndSHA512 SignatureScheme = 0x0603
+
+	// EdDSA algorithms
+	Ed25519 SignatureScheme = 0x0807
+	Ed448   SignatureScheme = 0x0808
 
 	// Legacy signature and hash algorithms for TLS 1.2.
 	ECDSAWithSHA1 SignatureScheme = 0x0203
@@ -525,6 +600,10 @@ type Config struct {
 	// by the policy in ClientAuth.
 	ClientCAs *x509.CertPool
 
+	// ClientCertificateTypes defines the set of allowed client certificate
+	// types. The default is CertTypeRSASign and CertTypeECDSASign.
+	ClientCertificateTypes []byte
+
 	// InsecureSkipVerify controls whether a client verifies the
 	// server's certificate chain and host name.
 	// If InsecureSkipVerify is true, TLS accepts any certificate
@@ -641,6 +720,36 @@ type Config struct {
 	// This value has no meaning for the client.
 	GetDelegatedCredential func(*ClientHelloInfo, uint16) ([]byte, crypto.PrivateKey, error)
 
+	// TokenBindingParams contains a list of TokenBindingKeyParameters
+	// (draft-ietf-tokbind-protocol-16) to attempt to negotiate. If
+	// nil, Token Binding will not be negotiated.
+	TokenBindingParams []byte
+
+	// TokenBindingVersion contains the serialized ProtocolVersion to
+	// use when negotiating Token Binding.
+	TokenBindingVersion uint16
+
+	// ExpectTokenBindingParams is checked by a server that the client
+	// sent ExpectTokenBindingParams as its list of Token Binding
+	// paramters.
+	ExpectTokenBindingParams []byte
+
+	// PreSharedKey, if not nil, is the pre-shared key to use with
+	// the PSK cipher suites.
+	PreSharedKey []byte
+
+	// PreSharedKeyIdentity, if not empty, is the identity to use
+	// with the PSK cipher suites.
+	PreSharedKeyIdentity string
+
+	// SRTPProtectionProfiles, if not nil, is the list of SRTP
+	// protection profiles to offer in DTLS-SRTP.
+	SRTPProtectionProfiles []uint16
+
+	// QUICTransportParams, if not empty, will be sent in the QUIC
+	// transport parameters extension.
+	QUICTransportParams []byte
+
 	serverInitOnce sync.Once // guards calling (*Config).serverInit
 
 	// mutex protects sessionTicketKeys.
@@ -706,6 +815,7 @@ func (c *Config) Clone() *Config {
 		ServerName:                  c.ServerName,
 		ClientAuth:                  c.ClientAuth,
 		ClientCAs:                   c.ClientCAs,
+		ClientCertificateTypes:      c.ClientCertificateTypes,
 		InsecureSkipVerify:          c.InsecureSkipVerify,
 		CipherSuites:                c.CipherSuites,
 		PreferServerCipherSuites:    c.PreferServerCipherSuites,
@@ -723,6 +833,13 @@ func (c *Config) Clone() *Config {
 		SessionTicketSealer:         c.SessionTicketSealer,
 		AcceptDelegatedCredential:   c.AcceptDelegatedCredential,
 		GetDelegatedCredential:      c.GetDelegatedCredential,
+		TokenBindingParams:          c.TokenBindingParams,
+		TokenBindingVersion:         c.TokenBindingVersion,
+		ExpectTokenBindingParams:    c.ExpectTokenBindingParams,
+		PreSharedKey:                c.PreSharedKey,
+		PreSharedKeyIdentity:        c.PreSharedKeyIdentity,
+		SRTPProtectionProfiles:      c.SRTPProtectionProfiles,
+		QUICTransportParams:         c.QUICTransportParams,
 		sessionTicketKeys:           sessionTicketKeys,
 		UseExtendedMasterSecret:     c.UseExtendedMasterSecret,
 	}

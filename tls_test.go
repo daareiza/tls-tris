@@ -666,17 +666,17 @@ func TestCloneNonFuncFields(t *testing.T) {
 			f.Set(reflect.ValueOf(io.Writer(os.Stdout)))
 		case "NextProtos":
 			f.Set(reflect.ValueOf([]string{"a", "b"}))
-		case "ServerName":
+		case "ServerName", "PreSharedKeyIdentity":
 			f.Set(reflect.ValueOf("b"))
 		case "ClientAuth":
 			f.Set(reflect.ValueOf(VerifyClientCertIfGiven))
 		case "InsecureSkipVerify", "SessionTicketsDisabled", "DynamicRecordSizingDisabled", "PreferServerCipherSuites", "Accept0RTTData":
 			f.Set(reflect.ValueOf(true))
-		case "MinVersion", "MaxVersion":
+		case "MinVersion", "MaxVersion", "TokenBindingVersion":
 			f.Set(reflect.ValueOf(uint16(VersionTLS12)))
 		case "SessionTicketKey":
 			f.Set(reflect.ValueOf([32]byte{}))
-		case "CipherSuites":
+		case "CipherSuites", "SRTPProtectionProfiles":
 			f.Set(reflect.ValueOf([]uint16{1, 2}))
 		case "CurvePreferences":
 			f.Set(reflect.ValueOf([]CurveID{CurveP256}))
@@ -690,6 +690,8 @@ func TestCloneNonFuncFields(t *testing.T) {
 			f.Set(reflect.ValueOf(false))
 		case "UseExtendedMasterSecret":
 			f.Set(reflect.ValueOf(false))
+		case "ClientCertificateTypes", "TokenBindingParams", "ExpectTokenBindingParams", "PreSharedKey", "QUICTransportParams":
+			f.Set(reflect.ValueOf([]byte{}))
 		default:
 			t.Errorf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

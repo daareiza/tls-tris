@@ -211,7 +211,7 @@ NextCandidate:
 		return nil, errors.New("tls: certificate private key does not implement crypto.Signer")
 	}
 
-	signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(priv.Public(), clientHello.supportedSignatureAlgorithms, supportedSignatureAlgorithms, ka.version)
+	signatureAlgorithm, sigType, hashFunc, err := pickSignatureAlgorithm(priv.Public(), clientHello.signatureAlgorithms, supportedSignatureAlgorithms, ka.version)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +336,7 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 			return errServerKeyExchange
 		}
 	}
-	_, sigType, hashFunc, err := pickSignatureAlgorithm(pk, []SignatureScheme{signatureAlgorithm}, clientHello.supportedSignatureAlgorithms, ka.version)
+	_, sigType, hashFunc, err := pickSignatureAlgorithm(pk, []SignatureScheme{signatureAlgorithm}, clientHello.signatureAlgorithms, ka.version)
 	if err != nil {
 		return err
 	}
