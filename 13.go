@@ -221,14 +221,14 @@ func (ks *keySchedule13) prepareCipher(secretLabel secretLabel) (interface{}, []
 	hash := hashForSuite(ks.suite)
 	key := hkdfExpandLabel(hash, trafficSecret, nil, "key", ks.suite.keyLen)
 	iv := hkdfExpandLabel(hash, trafficSecret, nil, "iv", ks.suite.ivLen)
-	return ks.suite.aead(key, iv), trafficSecret
+	return ks.suite.aead(VersionTLS13, key, iv), trafficSecret
 }
 
 func (hs *serverHandshakeState) doTLS13Handshake() error {
 	config := hs.c.config
 	c := hs.c
 
-	hs.c.cipherSuite, hs.hello.cipherSuite = hs.suite.id, hs.suite.id
+	hs.c.cipherSuite, hs.hello.cipherSuite = hs.suite, hs.suite.id
 	// When picking the group for the handshake, priority is given to groups
 	// that the client provided a keyShareEntry for, so to avoid a round-trip.
 	// After that the order of CurvePreferences is respected.

@@ -355,7 +355,7 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 		return errors.New("tls: server chose an inappropriate cipher suite")
 	}
 
-	hs.c.cipherSuite = hs.suite.id
+	hs.c.cipherSuite = hs.suite
 	return nil
 }
 
@@ -654,8 +654,8 @@ func (hs *clientHandshakeState) establishKeys() error {
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
 		serverHash = hs.suite.mac(c.vers, serverMAC)
 	} else {
-		clientCipher = hs.suite.aead(clientKey, clientIV)
-		serverCipher = hs.suite.aead(serverKey, serverIV)
+		clientCipher = hs.suite.aead(c.vers, clientKey, clientIV)
+		serverCipher = hs.suite.aead(c.vers, serverKey, serverIV)
 	}
 
 	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)

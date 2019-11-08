@@ -62,6 +62,11 @@ const (
 	suiteDefaultOff
 )
 
+type tlsAead struct {
+	cipher.AEAD
+	explicitNonce bool
+}
+
 // A cipherSuite is a specific combination of key agreement, cipher and MAC
 // function.
 type cipherSuite struct {
@@ -75,7 +80,7 @@ type cipherSuite struct {
 	flags  int
 	cipher func(key, iv []byte, isRead bool) interface{}
 	mac    func(version uint16, macKey []byte) macFunction
-	aead   func(key, fixedNonce []byte) cipher.AEAD
+	aead   func(version uint16, key, fixedNonce []byte) *tlsAead
 }
 
 var cipherSuites = []*cipherSuite{
@@ -170,8 +175,8 @@ type aead interface {
 // each call.
 type fixedNonceAEAD struct {
 	// nonce contains the fixed part of the nonce in the first four bytes.
-	nonce [12]byte
-	aead  cipher.AEAD
+	sealNonce, openNonce []byte
+	aead                 cipher.AEAD
 }
 
 func (f *fixedNonceAEAD) NonceSize() int { return 8 }
@@ -182,51 +187,47 @@ func (f *fixedNonceAEAD) Overhead() int         { return f.aead.Overhead() }
 func (f *fixedNonceAEAD) explicitNonceLen() int { return 8 }
 
 func (f *fixedNonceAEAD) Seal(out, nonce, plaintext, additionalData []byte) []byte {
-	copy(f.nonce[4:], nonce)
-	return f.aead.Seal(out, f.nonce[:], plaintext, additionalData)
+	copy(f.sealNonce[len(f.sealNonce)-8:], nonce)
+	return f.aead.Seal(out, f.sealNonce, plaintext, additionalData)
 }
 
 func (f *fixedNonceAEAD) Open(out, nonce, plaintext, additionalData []byte) ([]byte, error) {
-	copy(f.nonce[4:], nonce)
-	return f.aead.Open(out, f.nonce[:], plaintext, additionalData)
+	copy(f.openNonce[len(f.openNonce)-8:], nonce)
+	return f.aead.Open(out, f.openNonce, plaintext, additionalData)
+}
+
+func xorSlice(out, in []byte) {
+	for i := range out {
+		out[i] ^= in[i]
+	}
 }
 
 // xoredNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
 // before each call.
 type xorNonceAEAD struct {
-	nonceMask [12]byte
-	aead      cipher.AEAD
+	sealNonce, openNonce []byte
+	aead                 cipher.AEAD
 }
 
-func (f *xorNonceAEAD) NonceSize() int        { return 8 }
-func (f *xorNonceAEAD) Overhead() int         { return f.aead.Overhead() }
-func (f *xorNonceAEAD) explicitNonceLen() int { return 0 }
+func (x *xorNonceAEAD) NonceSize() int        { return 8 }
+func (x *xorNonceAEAD) Overhead() int         { return x.aead.Overhead() }
+func (x *xorNonceAEAD) explicitNonceLen() int { return 0 }
 
-func (f *xorNonceAEAD) Seal(out, nonce, plaintext, additionalData []byte) []byte {
-	for i, b := range nonce {
-		f.nonceMask[4+i] ^= b
-	}
-	result := f.aead.Seal(out, f.nonceMask[:], plaintext, additionalData)
-	for i, b := range nonce {
-		f.nonceMask[4+i] ^= b
-	}
-
-	return result
+func (x *xorNonceAEAD) Seal(out, nonce, plaintext, additionalData []byte) []byte {
+	xorSlice(x.sealNonce[len(x.sealNonce)-len(nonce):], nonce)
+	ret := x.aead.Seal(out, x.sealNonce, plaintext, additionalData)
+	xorSlice(x.sealNonce[len(x.sealNonce)-len(nonce):], nonce)
+	return ret
 }
 
-func (f *xorNonceAEAD) Open(out, nonce, plaintext, additionalData []byte) ([]byte, error) {
-	for i, b := range nonce {
-		f.nonceMask[4+i] ^= b
-	}
-	result, err := f.aead.Open(out, f.nonceMask[:], plaintext, additionalData)
-	for i, b := range nonce {
-		f.nonceMask[4+i] ^= b
-	}
-
-	return result, err
+func (x *xorNonceAEAD) Open(out, nonce, plaintext, additionalData []byte) ([]byte, error) {
+	xorSlice(x.openNonce[len(x.openNonce)-len(nonce):], nonce)
+	ret, err := x.aead.Open(out, x.openNonce, plaintext, additionalData)
+	xorSlice(x.openNonce[len(x.openNonce)-len(nonce):], nonce)
+	return ret, err
 }
 
-func aeadAESGCM12(key, fixedNonce []byte) cipher.AEAD {
+func aeadAESGCM12(version uint16, key, fixedNonce []byte) *tlsAead {
 	aes, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err)
@@ -236,12 +237,18 @@ func aeadAESGCM12(key, fixedNonce []byte) cipher.AEAD {
 		panic(err)
 	}
 
-	ret := &fixedNonceAEAD{aead: aead}
-	copy(ret.nonce[:], fixedNonce)
-	return ret
+	nonce1, nonce2 := make([]byte, 12), make([]byte, 12)
+	copy(nonce1, fixedNonce)
+	copy(nonce2, fixedNonce)
+
+	if version >= VersionTLS13 {
+		return &tlsAead{&xorNonceAEAD{nonce1, nonce2, aead}, false}
+	}
+
+	return &tlsAead{&fixedNonceAEAD{nonce1, nonce2, aead}, true}
 }
 
-func aeadAESGCM13(key, fixedNonce []byte) cipher.AEAD {
+func aeadAESGCM13(version uint16, key, fixedNonce []byte) *tlsAead {
 	aes, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err)
@@ -251,20 +258,28 @@ func aeadAESGCM13(key, fixedNonce []byte) cipher.AEAD {
 		panic(err)
 	}
 
-	ret := &xorNonceAEAD{aead: aead}
-	copy(ret.nonceMask[:], fixedNonce)
-	return ret
+	nonce1, nonce2 := make([]byte, 12), make([]byte, 12)
+	copy(nonce1, fixedNonce)
+	copy(nonce2, fixedNonce)
+
+	if version >= VersionTLS13 {
+		return &tlsAead{&xorNonceAEAD{nonce1, nonce2, aead}, false}
+	}
+
+	return &tlsAead{&fixedNonceAEAD{nonce1, nonce2, aead}, true}
 }
 
-func aeadChaCha20Poly1305(key, fixedNonce []byte) cipher.AEAD {
+func aeadChaCha20Poly1305(version uint16, key, fixedNonce []byte) *tlsAead {
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		panic(err)
 	}
 
-	ret := &xorNonceAEAD{aead: aead}
-	copy(ret.nonceMask[:], fixedNonce)
-	return ret
+	nonce1, nonce2 := make([]byte, len(fixedNonce)), make([]byte, len(fixedNonce))
+	copy(nonce1, fixedNonce)
+	copy(nonce2, fixedNonce)
+
+	return &tlsAead{&xorNonceAEAD{nonce1, nonce2, aead}, false}
 }
 
 // ssl30MAC implements the SSLv3 MAC function, as defined in

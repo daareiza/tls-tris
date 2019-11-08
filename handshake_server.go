@@ -669,8 +669,8 @@ func (hs *serverHandshakeState) establishKeys() error {
 		serverCipher = hs.suite.cipher(serverKey, serverIV, false /* not for reading */)
 		serverHash = hs.suite.mac(c.vers, serverMAC)
 	} else {
-		clientCipher = hs.suite.aead(clientKey, clientIV)
-		serverCipher = hs.suite.aead(serverKey, serverIV)
+		clientCipher = hs.suite.aead(c.vers, clientKey, clientIV)
+		serverCipher = hs.suite.aead(c.vers, serverKey, serverIV)
 	}
 
 	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
@@ -766,7 +766,7 @@ func (hs *serverHandshakeState) sendFinished(out []byte) error {
 		return err
 	}
 
-	c.cipherSuite = hs.suite.id
+	c.cipherSuite = hs.suite
 	copy(out, finished.verifyData)
 
 	return nil

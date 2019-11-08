@@ -50,7 +50,8 @@ type Conn struct {
 	// zero or one.
 	handshakes       int
 	didResume        bool // whether this connection was a session resumption
-	cipherSuite      uint16
+	cipherSuite      *cipherSuite
+	earlyCipherSuite *cipherSuite
 	ocspResponse     []byte   // stapled OCSP response
 	scts             [][]byte // Signed certificate timestamps from server
 	peerCertificates []*x509.Certificate
@@ -131,6 +132,10 @@ type Conn struct {
 	binder []byte
 
 	tmp [16]byte
+
+	keyUpdateSeen      bool
+	keyUpdateRequested bool
+	seenOneByteRecord  bool
 }
 
 type handshakeStatus int
@@ -196,6 +201,8 @@ type halfConn struct {
 
 	// used to save allocating a new buffer for each MAC.
 	inDigestBuf, outDigestBuf []byte
+
+	trafficSecret []byte
 
 	traceErr func(error)
 }
@@ -341,16 +348,15 @@ func (hc *halfConn) decrypt(b *block) (ok bool, prefixLen int, alertValue alert)
 		switch c := hc.cipher.(type) {
 		case cipher.Stream:
 			c.XORKeyStream(payload, payload)
-		case aead:
-			explicitIVLen = c.explicitNonceLen()
-			if len(payload) < explicitIVLen {
-				return false, 0, alertBadRecordMAC
-			}
-			nonce := payload[:explicitIVLen]
-			payload = payload[explicitIVLen:]
-
-			if len(nonce) == 0 {
-				nonce = hc.seq[:]
+		case *tlsAead:
+			nonce := hc.seq[:]
+			if c.explicitNonce {
+				explicitIVLen = 8
+				if len(payload) < explicitIVLen {
+					return false, 0, alertBadRecordMAC
+				}
+				nonce = payload[:8]
+				payload = payload[8:]
 			}
 
 			var additionalData []byte
@@ -468,16 +474,21 @@ func (hc *halfConn) encrypt(b *block, explicitIVLen int) (bool, alert) {
 
 	// encrypt
 	if hc.cipher != nil {
+		// Add TLS 1.3 padding.
+		if hc.version >= VersionTLS13 {
+			// TODO: TLS 1.3 padding
+		}
+
 		switch c := hc.cipher.(type) {
 		case cipher.Stream:
 			c.XORKeyStream(payload, payload)
-		case aead:
+		case *tlsAead:
 			// explicitIVLen is always 0 for TLS1.3
 			payloadLen := len(b.data) - recordHeaderLen - explicitIVLen
 			payloadOffset := recordHeaderLen + explicitIVLen
-			nonce := b.data[recordHeaderLen : recordHeaderLen+explicitIVLen]
-			if len(nonce) == 0 {
-				nonce = hc.seq[:]
+			nonce := hc.seq[:]
+			if c.explicitNonce {
+				nonce = b.data[recordHeaderLen : recordHeaderLen+explicitIVLen]
 			}
 
 			var additionalData []byte
@@ -515,6 +526,7 @@ func (hc *halfConn) encrypt(b *block, explicitIVLen int) (bool, alert) {
 				c.SetIV(payload[:explicitIVLen])
 				payload = payload[explicitIVLen:]
 			}
+			// TODO: TLS 1.3 CBC padding
 			prefix, finalBlock := padToBlockSize(payload, blockSize)
 			b.resize(recordHeaderLen + explicitIVLen + len(prefix) + len(finalBlock))
 			c.CryptBlocks(b.data[recordHeaderLen+explicitIVLen:], prefix)
@@ -1053,8 +1065,8 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 			}
 		}
 		if explicitIVLen == 0 {
-			if c, ok := c.out.cipher.(aead); ok {
-				explicitIVLen = c.explicitNonceLen()
+			if c, ok := c.out.cipher.(*tlsAead); ok && c.explicitNonce {
+				explicitIVLen = 8
 
 				// The AES-GCM construction in TLS has an
 				// explicit nonce so that the nonce can be
@@ -1247,6 +1259,13 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	if !c.handshakeComplete {
 		return 0, alertInternalError
+	}
+
+	if c.keyUpdateRequested {
+		if err := c.sendKeyUpdateLocked(keyUpdateNotRequested); err != nil {
+			return 0, err
+		}
+		c.keyUpdateRequested = false
 	}
 
 	if c.closeNotifySent {
@@ -1683,7 +1702,7 @@ func (c *Conn) ConnectionState() ConnectionState {
 		state.NegotiatedProtocol = c.clientProtocol
 		state.DidResume = c.didResume
 		state.NegotiatedProtocolIsMutual = !c.clientProtocolFallback
-		state.CipherSuite = c.cipherSuite
+		state.CipherSuite = c.cipherSuite.id
 		state.PeerCertificates = c.peerCertificates
 		state.VerifiedChains = c.verifiedChains
 		state.SignedCertificateTimestamps = c.scts
@@ -1732,4 +1751,44 @@ func (c *Conn) VerifyHostname(host string) error {
 		return errors.New("tls: handshake did not verify certificate chain")
 	}
 	return c.peerCertificates[0].VerifyHostname(host)
+}
+
+func (c *Conn) sendKeyUpdateLocked(keyUpdateRequest byte) error {
+	if c.vers < VersionTLS13 {
+		return errors.New("tls: attempted to send KeyUpdate before TLS 1.3")
+	}
+
+	m := keyUpdateMsg{
+		keyUpdateRequest: keyUpdateRequest,
+	}
+	if _, err := c.writeRecordLocked(recordTypeHandshake, m.marshal()); err != nil {
+		return err
+	}
+	hash := hashForSuite(c.cipherSuite)
+	c.useOutTrafficSecret(c.out.version, c.cipherSuite, updateTrafficSecret(hash, c.vers, c.out.trafficSecret))
+	return nil
+}
+
+func (c *Conn) useOutTrafficSecret(version uint16, suite *cipherSuite, secret []byte) {
+	side := serverWrite
+	if c.isClient {
+		side = clientWrite
+	}
+	c.out.useTrafficSecret(version, suite, secret, side)
+}
+
+// useTrafficSecret sets the current cipher state for TLS 1.3.
+func (hc *halfConn) useTrafficSecret(version uint16, suite *cipherSuite, secret []byte, side trafficDirection) {
+	hc.version = version
+	hc.cipher = deriveTrafficAEAD(version, suite, secret, side)
+	hc.trafficSecret = secret
+	hc.incEpoch()
+}
+
+// incEpoch resets the sequence number. In DTLS, it also increments the epoch
+// half of the sequence number.
+func (hc *halfConn) incEpoch() {
+	for i := range hc.seq {
+		hc.seq[i] = 0
+	}
 }
